@@ -1,0 +1,244 @@
+#Task0 preparation
+#install the packages needed in the exercises
+install.packages("tm")
+install.packages("C:/Users/XYX-Quan/Desktop/tm.corpus.Reuters21578", repos = NULL, type="source")
+install.packages("SnowballC")
+install.packages("wordcloud")
+install.packages("slam")
+install.packages("topicmodels")
+install.packages("RTextTools")
+
+#Import data
+library(tm)
+library(SnowballC)
+require(tm)
+require(tm.corpus.Reuters21578)
+data(Reuters21578)
+rt <- Reuters21578
+
+#Task1 Preprocessing
+
+class(rt)                                                                               
+summary(rt)                     
+inspect(rt)
+class(rt[[1]])
+meta(rt[[1]])
+
+#use LEWISSPLIT attribute of each document to split data into train set and test set
+train <- "LEWISSPLIT == 'TRAIN'"
+rtTrain <- tm_filter(rt, FUN = sFilter, train)
+length(rtTrain)
+
+test <- "LEWISSPLIT == 'TEST'"
+rtTest <- tm_filter(rt, FUN = sFilter, test)
+length(rtTest)
+
+#set the text mining option
+options(stringsAsFactors=FALSE)
+
+#data cleaning
+Clean <- function(reuters){
+  reuters <- tm_map(reuters,removePunctuation)
+  reuters <- tm_map(reuters,removeNumbers)
+  reuters <- tm_map(reuters, tolower)
+  reuters <- tm_map(reuters, stemDocument)
+  reuters <- tm_map(reuters , removeWords, stopwords("english"))
+  reuters <- tm_map(reuters, stripWhitespace)
+  return(corpus_rsw)
+}
+rtTrain <- clean(rtTrain)
+rtTest <- clean(rtTest)
+rtTrain[[2]]
+
+
+#Task2 feature engineering
+#TDM
+TDMTrain <- DocumentTermMatrix(rtTrain)
+dim(TDMTrain)
+
+# TF-IDF
+library(slam)
+TFIDF <- tapply(TDMTrain$v/row_sums(TDMTrain)[TDMTrain$i], TDMTrain$j, mean) * log2(nDocs(TDMTrain)/col_sums(TDMTrain > 0))
+summary(TFIDF)
+
+#Remove documents with value less than the median
+TDMTrain <- TDMTrain[,TFIDF >= 0.15]
+dim(TDMTrain)
+
+#Remove Sparse Terms
+TDMTrain <- removeSparseTerms(TDMTrain, 0.996)
+
+#Create dictionary from train set terms after preprocessing and apply to test set to preprocess. This is so that terms in test set match train set
+TermDic <- colnames(TDMTrain)        
+TDMTest <- DocumentTermMatrix(rtTest, list(dictionary=TermDic))
+
+TDMTrain <- TDMTrain[row_sums(TDMTrain) > 0,]
+dim(TDMTrain)
+TDMTest <- TDMTest[row_sums(TDMTest) > 0,]
+dim(TDMTest)
+
+TDMNew <- rbind(TDMTrain, TDMTest)
+dim(TDMNew)
+
+#Visualise term using word cloud
+library(wordcloud)
+m <- as.matrix(TDMTrain)
+v <- sort(colSums(m), decreasing = TRUE)
+head(v, 5)
+words <- names(v)
+d <- data.frame(word=words, freq=v)
+wordcloud(d$word, d$freq, min.freq=1000)
+
+#Topic Model
+library(topicmodels)
+
+k <- 30
+rtm_LDA <- LDA(TDMTrain, k=k, method = "VEM", control = list(seed = as.integer(Sys.time())))
+rtm_CTM <- CTM(TDMTrain, k=k, method = "VEM", control = list(seed = as.integer(Sys.time())))
+
+#10 most common terms in each topic to infere theme/topic
+rtTerms_LDA <- as.data.frame(terms(rtm_LDA, 10))
+rtTerms_CTM <- as.data.frame(terms(rtm_CTM, 10))
+
+rtTopics_LDA <- posterior(rtm_LDA, rtdmNew)$topics
+df.rtTopics_LDA <- as.data.frame(rtTopics_LDA)
+
+rtTopics_CTM <- posterior(rtm_CTM, rtdmNew)$topics
+df.rtTopics_CTM <- as.data.frame(rtTopics_CTM)
+
+#Task3 Classification
+#Vector to hold 10 important topics in corpus as class label
+Topic <- c("earn", "money-fx", "grain", "crude", "trade", "interest", "ship", "wheat", "corn")
+
+#Create label dataframe from corpus
+labelFUN <- function(topic, corpus) {
+  label <- list()
+  #Create vector for each topic
+  for (i in 1:length(topic)){
+    label[[i]] <- rep(0, length(corpus))
+    #Check if topic exists in each document of corpus
+    for (j in 1:length(corpus)) {
+      if (topic[i] %in% meta(corpus[[j]], tag = 'Topics')) {
+        label[[i]][j] <- 1
+      }
+    }
+  }
+  #Convert list to df
+  labelDF <- do.call(cbind.data.frame, label)
+  names(labelDF) <- topic
+  return(labelDF)
+}
+
+#Dataframe for class labels
+labelDF <- labelFUN(Topic, rt)
+dim(labelDF)
+
+
+
+library(RTextTools)
+
+#Create container for each topic
+container <- list()
+analytics <- list()
+for (i in 1:length(Topic)) {
+  #Topic
+  container[[i]] <- create_container(TDMNew, labelDF[rownames(TDMNew), i], trainSize = 1:12791, testSize= 12792:18213, virgin=FALSE)
+  #Train
+  RF <- train_model(container[[i]], "RF")
+  TREE <- train_model(container[[i]], "TREE")
+  #Classify
+  RFCL <- classify_model(container[[i]], RF)
+  TREECL <- classify_model(container[[i]], TREE)
+  #Analytics
+  analytics[[i]] <- create_analytics(container[[i]], cbind( RFCL, TREECL))  
+}
+
+#Evaluation criteia 
+Precision <-c()
+Recall <- c()
+F1Score <- c()
+
+#RF Accuracy dataframe
+for(i in 1:length(Topic)) {
+  Precision[i] <- summary(analytics[[i]])[4]
+  Recall[i] <- summary(analytics[[i]])[5]
+  F1Score[i] <- summary(analytics[[i]])[6]
+}
+scoreRF <- data.frame(Topic, Precision, Recall, F1Score)
+
+#TREE Accuracy dataframe
+for(i in 1:length(Topic)) {
+  Precision[i] <- summary(analytics[[i]])[7]
+  Recall[i] <- summary(analytics[[i]])[8]
+  F1Score[i] <- summary(analytics[[i]])[9]
+}
+scoreTREE <- data.frame(Topic, Precision, Recall, F1Score)
+
+#Visualise
+library(ggplot2)
+
+#Plot RF Measures
+plotRF <- data.frame(scoreRF[1], stack(scoreRF[2:4]))
+colnames(plotRF) <- c("Topic", "Measures", "Type")
+ggplot(data=plotRF, aes(x=Topic, y=Measures, group=Type, color=Type)) + geom_line() + geom_point() + labs(title = "RF")
+
+#Plot RF Measures
+plotTREE <- data.frame(scoreTREE[1], stack(scoreTREE[2:4]))
+colnames(plotTREE) <- c("Topic", "Measures", "Type")
+ggplot(data=plotTREE, aes(x=Topic, y=Measures, group=Type, color=Type)) + geom_line() + geom_point() + labs(title = "Tree")
+
+#Classification using topic model terms
+# Convert training document term matrix(dtmTrainingSet) into a data frame (dfTrain)
+dfTrain= data.frame(inspect(TDMTrain))
+# Get topic labels from topic model
+rtTopics_LDA = topics(rtm_LDA) # column with topic labels from topic models
+# Assign topic labels (from TM) to training data as an external column
+dfTrain[,524]= rtTopics_LDA
+# Create feature space for each topic classification
+terms <- list()
+dic <- list()
+rtmTrain <- list()
+rtmTest <- list()
+rtmNew <- list()
+for(i in 1:length(Topic)){
+  # Get document IDs having topic i from docLabels
+  ID = rownames(labelDF[labelDF[i]==1,])
+  # Get subset of topic labels assigned by topic model for topic i
+  labelsTM <- dfTrain[rownames(dfTrain)%in%ID,524]
+  # Get associated terms assigned by topic model  
+  terms[[i]] = as.vector(terms(rtm_LDA,15)[1:10,unique(labelsTM)])
+  dic[[i]] <- terms[[i]]       
+  rtmTrain[[i]] <- DocumentTermMatrix(rtTrain, list(dictionary=ic[[i]]))
+}
+dim
+#Task4 Clustering
+#k-means (this uses euclidean distance)
+m <- as.matrix(rtdmNew)
+rownames(m) <- 1:nrow(m)
+
+#Normalize the vectors so Euclidean makes sense
+norm_eucl <- function(m) m/apply(m, MARGIN=1, FUN=function(x) sum(x^2)^.5)
+m_norm <- norm_eucl(m)
+
+#Cluster into 9 clusters
+cl <- kmeans(m_norm, 9)
+cl
+
+table(cl$cluster)
+
+# show clusters using the first 2 principal components
+plot(prcomp(m_norm)$x, col=cl$cl)
+
+findFreqTerms(TDMNew[cl$cluster==1], 50)
+inspect(reuters[which(cl$cluster==1)])
+
+#hierarchical clustering
+library(proxy)
+
+d <- dist(m, method="cosine")
+hc <- hclust(d, method="average")
+plot(hc)
+
+cl <- cutree(hc, 50)
+table(cl)
+findFreqTerms(rtdmNew[cl==1], 50)
